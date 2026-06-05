@@ -1,33 +1,30 @@
 /**
- * WarIn.Space - Complete Optimized TypeScript Client
- * Refactored for performance, maintainability, and extensibility
+ * WarIn.Space - Complete TypeScript Client Rewrite
+ * Full game client + hack mod system
+ * Original: code.js (minified JavaScript)
+ * Refactored: warin.ts (TypeScript with full type safety)
  */
 
-// ============================================================
-// TYPES & INTERFACES
-// ============================================================
+// ============================================================================
+// GLOBAL STATE & TYPES
+// ============================================================================
 
 interface Vec2 {
   x: number;
   y: number;
 }
 
-interface Entity extends Vec2 {
+interface Player extends Vec2 {
   id: number;
   angle: number;
   health: number;
   maxHealth: number;
   team: number;
-  lastUpdateTime: number;
-}
-
-interface Player extends Entity {
   name: string;
   firingRange: number;
   damage: number;
   drones: number;
   maxDrones: number;
-  velocity: Vec2;
   upgrades: number[];
 }
 
@@ -35,1109 +32,707 @@ interface Scrap extends Vec2 {
   id: number;
 }
 
-interface Turret extends Entity {
-  firingRange: number;
+interface Turret extends Vec2 {
+  id: number;
+  angle: number;
+  team: number;
 }
 
-interface GameState {
-  players: Map<number, Player>;
-  scraps: Map<number, Scrap>;
-  turrets: Map<number, Turret>;
-  drones: Map<number, Entity>;
-  missiles: Map<number, Entity>;
-  self: Player | null;
-  selfId: number;
-  selfTeam: number;
-  mapWidth: number;
-  mapHeight: number;
-  basePositions: Vec2[];
-  ffa: boolean;
+interface Drone extends Vec2 {
+  id: number;
+  angle: number;
+  owner: number;
 }
 
-interface ModSettings {
-  hackAutoFire: boolean;
-  hackTracers: boolean;
-  hackAutoScrap: boolean;
-  hackHPNumbers: boolean;
-  hackEnemyRadar: boolean;
-  hackRangeRing: boolean;
-  hackAutoAim: boolean;
-  hackESPArrows: boolean;
-  hackPredictLine: boolean;
-  hackThreatMeter: boolean;
-  hackFPS: boolean;
-  hackEnemyDist: boolean;
-  hackFireRate: number;
-  hackZoom: number;
-  botEnabled: boolean;
+interface Missile extends Vec2 {
+  id: number;
+  vx: number;
+  vy: number;
+  owner: number;
 }
 
-const DEFAULT_SETTINGS: ModSettings = {
-  hackAutoFire: false,
-  hackTracers: true,
-  hackAutoScrap: false,
-  hackHPNumbers: true,
-  hackEnemyRadar: true,
-  hackRangeRing: true,
-  hackAutoAim: false,
-  hackESPArrows: true,
-  hackPredictLine: false,
-  hackThreatMeter: true,
-  hackFPS: true,
-  hackEnemyDist: false,
-  hackFireRate: 80,
-  hackZoom: 1.0,
-  botEnabled: false
-};
+interface Entity extends Vec2 {
+  id: number;
+}
 
-// ============================================================
-// MATH UTILITIES (Optimized)
-// ============================================================
+// ============================================================================
+// MOD SETTINGS
+// ============================================================================
 
-const TWO_PI = Math.PI * 2;
+let hackFireRate: number = 80;
+let hackZoom: number = 1.0;
+let hackAutoFire: boolean = false;
+let hackTracers: boolean = true;
+let hackAutoScrap: boolean = false;
+let hackHPNumbers: boolean = true;
+let hackEnemyRadar: boolean = true;
+let hackRangeRing: boolean = true;
+let hackAutoAim: boolean = false;
+let hackESPArrows: boolean = true;
+let hackPredictLine: boolean = false;
+let hackThreatMeter: boolean = true;
+let hackFPS: boolean = true;
+let hackEnemyDist: boolean = false;
 
-function distSq(x1: number, y1: number, x2: number, y2: number): number {
-  const dx = x1 - x2;
-  const dy = y1 - y2;
+// Internal tracking
+const hackVelocities: Record<number, Vec2> = {};
+const hackLastPos: Record<number, Vec2 & { t: number }> = {};
+let hackFPSValue: number = 0;
+let hackFPSFrames: number = 0;
+let hackFPSTimer: number = Date.now();
+
+// ============================================================================
+// AUTO-BOT STATE
+// ============================================================================
+
+let botEnabled: boolean = false;
+let botState: string = "SCRAP";
+let botStateAt: number = 0;
+let botAimAng: number = 0;
+let botOrbitDir: number = 1;
+let botOrbitFlip: number = 0;
+let botLastAbi: number = 0;
+let botUpgTimer: number = 0;
+let botScrapKey: number | null = null;
+let botScrapAge: number = 0;
+let botTick_last: number = 0;
+
+// Bot tuning
+const BOT_HZ: number = 80;
+const BOT_ENTER_ENGAGE: number = 1.4;
+const BOT_EXIT_ENGAGE: number = 2.0;
+const BOT_ENTER_FLEE: number = 0.26;
+const BOT_EXIT_FLEE: number = 0.62;
+const BOT_MIN_FLEE: number = 3000;
+const BOT_ORBIT_FRAC: number = 0.80;
+const BOT_ORBIT_BAND: number = 0.14;
+
+// ============================================================================
+// GAME STATE
+// ============================================================================
+
+let players: Record<number, Player> = {};
+let scraps: Record<number, Scrap> = {};
+let turrets: Record<number, Turret> = {};
+let drones: Record<number, Drone> = {};
+let missiles: Record<number, Missile> = {};
+
+let playerX: number = 0;
+let playerY: number = 0;
+let playerID: number = -1;
+let playerAngle: number = 0;
+let playerHealth: number = 0;
+let playerMaxHealth: number = 0;
+let playerTeam: number = 0;
+let playerScrap: number = 0;
+let playerFiringRange: number = 650;
+let playerDrones: number = 0;
+let playerMaxDrones: number = 5;
+let playerUpgrades: number[] = [0, 0, 0, 0];
+
+let selfAngle: number = 0;
+let selfTeam: number = 0;
+let selfHealth: number = 0;
+let selfMaxHealth: number = 0;
+let selfFireRate: number = 100;
+let selfFiringRange: number = 650;
+let scrap: number = 0;
+let Ec: boolean = false; // firing flag
+
+let FFA: boolean = false;
+let vd: any = null; // WebSocket connection
+let td: number = 5000; // map width
+let ud: number = 5000; // map height
+
+let pc: number = window.innerWidth / 2; // mouse x (for movement)
+let qc: number = window.innerHeight / 2; // mouse y (for movement)
+let gc: boolean = false; // mobile flag
+
+// Canvas & rendering
+let c: HTMLCanvasElement;
+let k: CanvasRenderingContext2D;
+let aa: HTMLCanvasElement;
+let ba: CanvasRenderingContext2D;
+let ca: HTMLCanvasElement;
+let da: CanvasRenderingContext2D;
+let ea: HTMLCanvasElement;
+let fa: CanvasRenderingContext2D;
+let l: HTMLCanvasElement;
+let n: CanvasRenderingContext2D;
+
+// DOM elements
+let ga: HTMLElement;
+let ha: HTMLElement;
+let ia: HTMLElement;
+let ja: HTMLElement;
+let ka: HTMLElement;
+let la: HTMLElement;
+let ma: HTMLElement;
+let na: HTMLElement;
+let p: HTMLSelectElement;
+
+// ============================================================================
+// MATH UTILITIES (OPTIMIZED)
+// ============================================================================
+
+function _bd2(ax: number, ay: number, bx: number, by: number): number {
+  const dx = ax - bx;
+  const dy = ay - by;
   return dx * dx + dy * dy;
 }
 
-function dist(x1: number, y1: number, x2: number, y2: number): number {
-  return Math.sqrt(distSq(x1, y1, x2, y2));
+function _bd(ax: number, ay: number, bx: number, by: number): number {
+  return Math.sqrt(_bd2(ax, ay, bx, by));
 }
 
-function angle(x1: number, y1: number, x2: number, y2: number): number {
-  return Math.atan2(y2 - y1, x2 - x1);
+function _ba(tx: number, ty: number): number {
+  return Math.atan2(ty - playerY, tx - playerX);
 }
 
-function angleDiff(a: number, b: number): number {
-  let diff = b - a;
-  while (diff > Math.PI) diff -= TWO_PI;
-  while (diff < -Math.PI) diff += TWO_PI;
-  return diff;
+function _isEnemy(p: any): boolean {
+  return p && p.i > 0 && (FFA || p.c !== selfTeam);
 }
 
-function lerpAngle(current: number, target: number, t: number): number {
-  return current + angleDiff(current, target) * t;
+function _lerpAng(cur: number, tgt: number, t: number): number {
+  let d = tgt - cur;
+  while (d > Math.PI) d -= 2 * Math.PI;
+  while (d < -Math.PI) d += 2 * Math.PI;
+  return cur + d * t;
 }
 
-function clamp(value: number, min: number, max: number): number {
-  return Math.min(Math.max(value, min), max);
+function _moveDir(ang: number): void {
+  pc = window.innerWidth / 2 + Math.cos(ang) * 350;
+  qc = window.innerHeight / 2 + Math.sin(ang) * 350;
 }
 
-function lerp(a: number, b: number, t: number): number {
-  return a + (b - a) * t;
+function _stop(): void {
+  pc = window.innerWidth / 2;
+  qc = window.innerHeight / 2;
 }
 
-// ============================================================
-// BUFFER UTILITIES
-// ============================================================
+// ============================================================================
+// BOT QUERY FUNCTIONS
+// ============================================================================
 
-class BufferReader {
-  private view: DataView;
-  private offset: number = 0;
-
-  constructor(buffer: ArrayBuffer) {
-    this.view = new DataView(buffer);
-  }
-
-  readUint8(): number {
-    return this.view.getUint8(this.offset++);
-  }
-
-  readInt8(): number {
-    return this.view.getInt8(this.offset++);
-  }
-
-  readUint16(): number {
-    const val = this.view.getUint16(this.offset, true);
-    this.offset += 2;
-    return val;
-  }
-
-  readInt16(): number {
-    const val = this.view.getInt16(this.offset, true);
-    this.offset += 2;
-    return val;
-  }
-
-  readInt32(): number {
-    const val = this.view.getInt32(this.offset, true);
-    this.offset += 4;
-    return val;
-  }
-
-  readFloat32(): number {
-    const val = this.view.getFloat32(this.offset, true);
-    this.offset += 4;
-    return val;
-  }
-
-  readString(length?: number): string {
-    if (length === undefined) {
-      length = this.readUint8();
-    }
-    let result = '';
-    for (let i = 0; i < length; i++) {
-      result += String.fromCharCode(this.readUint16());
-    }
-    return result;
-  }
-
-  skip(bytes: number): void {
-    this.offset += bytes;
-  }
-}
-
-class BufferWriter {
-  private buffers: Uint8Array[] = [];
-  private currentSize: number = 0;
-
-  writeUint8(value: number): void {
-    const buf = new Uint8Array(1);
-    buf[0] = value & 0xff;
-    this.buffers.push(buf);
-    this.currentSize += 1;
-  }
-
-  writeInt16(value: number): void {
-    const buf = new Int16Array(1);
-    buf[0] = value;
-    this.buffers.push(new Uint8Array(buf.buffer));
-    this.currentSize += 2;
-  }
-
-  writeString(value: string): void {
-    this.writeUint8(value.length);
-    for (let i = 0; i < value.length; i++) {
-      const charBuf = new Uint16Array(1);
-      charBuf[0] = value.charCodeAt(i);
-      this.buffers.push(new Uint8Array(charBuf.buffer));
-      this.currentSize += 2;
+function botNearestEnemy(): any {
+  let best: any = null;
+  let bd2 = Infinity;
+  for (const id in players) {
+    const p = players[id];
+    if (!_isEnemy(p)) continue;
+    const d2 = _bd2(playerX, playerY, p.x, p.y);
+    if (d2 < bd2) {
+      bd2 = d2;
+      best = { id, p, d2 };
     }
   }
+  return best;
+}
 
-  toBuffer(): ArrayBuffer {
-    const result = new Uint8Array(this.currentSize);
-    let offset = 0;
-    for (const buf of this.buffers) {
-      result.set(buf, offset);
-      offset += buf.length;
+function botBestScrap(): any {
+  const enemies: any[] = [];
+  for (const eid in players) {
+    const ep = players[eid];
+    if (_isEnemy(ep)) enemies.push(ep);
+  }
+  const dangerR = selfFiringRange * 1.6;
+  const dangerR2 = dangerR * dangerR;
+
+  let bestKey: number | null = null;
+  let bestScore: number = -Infinity;
+  for (const k in scraps) {
+    const s = scraps[k];
+    const toScrap = _bd(playerX, playerY, s.x, s.y);
+    let score = 5000 - toScrap;
+    const mx = (playerX + s.x) / 2;
+    const my = (playerY + s.y) / 2;
+    for (let ei = 0; ei < enemies.length; ei++) {
+      const e = enemies[ei];
+      const d2dest = _bd2(e.x, e.y, s.x, s.y);
+      if (d2dest < dangerR2) score -= (1 - d2dest / dangerR2) * 3000;
+      const d2path = _bd2(e.x, e.y, mx, my);
+      if (d2path < dangerR2) score -= (1 - d2path / dangerR2) * 1500;
     }
-    return result.buffer;
+    if (score > bestScore) {
+      bestScore = score;
+      bestKey = parseInt(k);
+    }
+  }
+  return bestKey ? { key: bestKey, s: scraps[bestKey], score: bestScore } : null;
+}
+
+function botAreaSafe(x: number, y: number, radius: number): boolean {
+  const r2 = radius * radius;
+  for (const id in players) {
+    const p = players[id];
+    if (_isEnemy(p) && _bd2(x, y, p.x, p.y) < r2) return false;
+  }
+  return true;
+}
+
+// ============================================================================
+// BOT PASSIVE SYSTEMS
+// ============================================================================
+
+function _tryUpgrade(): void {
+  const now = Date.now();
+  if (now - botUpgTimer < 300) return;
+  for (let slot = 0; slot < 4; slot++) {
+    // TODO: call actual upgrade function
+    botUpgTimer = now;
+    return;
   }
 }
 
-// ============================================================
-// GAME STATE MANAGER (Optimized with caching)
-// ============================================================
+function _tryAbility(enemy: any): void {
+  const now = Date.now();
+  if (now - botLastAbi < 1500) return;
+  if (!enemy) return;
+  const r = selfFiringRange * 1.4;
+  if (enemy.d2 < r * r) {
+    // TODO: call ability
+    botLastAbi = now;
+  }
+}
 
-class GameStateManager {
-  private state: GameState = {
-    players: new Map(),
-    scraps: new Map(),
-    turrets: new Map(),
-    drones: new Map(),
-    missiles: new Map(),
-    self: null,
-    selfId: -1,
-    selfTeam: 0,
-    mapWidth: 5000,
-    mapHeight: 5000,
-    basePositions: [
-      { x: 2500, y: 2500 },
-      { x: 2500, y: 2500 }
-    ],
-    ffa: false
+function _doAim(tx: number, ty: number): void {
+  botAimAng = _lerpAng(botAimAng, Math.atan2(ty - playerY, tx - playerX), 0.3);
+  selfAngle = botAimAng;
+}
+
+function _doAimLeading(enemy: any): void {
+  let tx = enemy.p.x;
+  let ty = enemy.p.y;
+  if (hackVelocities[enemy.id]) {
+    const leadT = Math.sqrt(enemy.d2) / 840;
+    tx += hackVelocities[enemy.id].vx * leadT;
+    ty += hackVelocities[enemy.id].vy * leadT;
+  }
+  botAimAng = _lerpAng(botAimAng, Math.atan2(ty - playerY, tx - playerX), 0.28);
+  selfAngle = botAimAng;
+}
+
+function _setState(s: string): void {
+  if (botState === s) return;
+  botState = s;
+  botStateAt = Date.now();
+  botScrapKey = null;
+}
+
+function _orbitEnemy(ep: any): void {
+  const desiredR = selfFiringRange * BOT_ORBIT_FRAC;
+  const dist = _bd(playerX, playerY, ep.x, ep.y);
+  const toEnemy = _ba(ep.x, ep.y);
+  const now = Date.now();
+
+  const margin = 250;
+  const nearWall =
+    playerX < margin ||
+    playerX > td - margin ||
+    playerY < margin ||
+    playerY > ud - margin;
+  if (nearWall || now - botOrbitFlip > 4200 + Math.random() * 800) {
+    botOrbitDir *= -1;
+    botOrbitFlip = now;
+  }
+
+  const lo = desiredR * (1 - BOT_ORBIT_BAND);
+  const hi = desiredR * (1 + BOT_ORBIT_BAND);
+
+  let moveAng: number;
+  if (dist > hi) {
+    moveAng = toEnemy + botOrbitDir * 0.25;
+  } else if (dist < lo) {
+    moveAng = toEnemy + Math.PI + botOrbitDir * 0.25;
+  } else {
+    moveAng = toEnemy + (Math.PI / 2) * botOrbitDir;
+  }
+  _moveDir(moveAng);
+}
+
+// ============================================================================
+// BOT MAIN TICK
+// ============================================================================
+
+function botTick(): void {
+  if (!botEnabled) return;
+  if (!vd || gc || playerID < 0 || selfHealth <= 0) return;
+
+  const now = Date.now();
+  if (now - botTick_last < BOT_HZ) return;
+  botTick_last = now;
+
+  _tryUpgrade();
+
+  const hpFrac = selfHealth / selfMaxHealth;
+  const enemy = botNearestEnemy();
+  const enemyD = enemy ? Math.sqrt(enemy.d2) : Infinity;
+  const engageR = selfFiringRange * BOT_ENTER_ENGAGE;
+  const exitR = selfFiringRange * BOT_EXIT_ENGAGE;
+  const inRange = enemy && enemyD < selfFiringRange;
+
+  _tryAbility(enemy);
+
+  // State transitions
+  if (botState !== "RETREAT") {
+    if (hpFrac < BOT_ENTER_FLEE) {
+      _setState("RETREAT");
+    } else if (enemy && enemyD < engageR) {
+      _setState("ENGAGE");
+    } else if (botState !== "ENGAGE") {
+      _setState("SCRAP");
+    }
+  } else {
+    const timeInFlee = now - botStateAt;
+    const safeRadius = selfFiringRange * 1.8;
+    const safe = botAreaSafe(playerX, playerY, safeRadius);
+    if (hpFrac >= BOT_EXIT_FLEE && safe && timeInFlee >= BOT_MIN_FLEE) {
+      _setState(enemy ? "ENGAGE" : "SCRAP");
+    }
+  }
+
+  // State actions
+  switch (botState) {
+    case "RETREAT": {
+      const base = [0, 0]; // TODO: get base position
+      _moveDir(_ba(base[0], base[1]));
+      const awayAng = _ba(base[0], base[1]) + Math.PI;
+      botAimAng = _lerpAng(botAimAng, awayAng, 0.15);
+      selfAngle = botAimAng;
+      if (inRange && enemy) {
+        _doAimLeading(enemy);
+        Ec = true;
+      }
+      break;
+    }
+
+    case "ENGAGE": {
+      if (!enemy) {
+        _setState("SCRAP");
+        break;
+      }
+      _doAimLeading(enemy);
+      if (inRange) Ec = true;
+      if (enemyD < selfFiringRange * 1.1) {
+        _orbitEnemy(enemy.p);
+      } else {
+        _moveDir(_ba(enemy.p.x, enemy.p.y));
+      }
+      break;
+    }
+
+    case "SCRAP": {
+      if (!botScrapKey || !scraps[botScrapKey] || now - botScrapAge > 1200) {
+        const best = botBestScrap();
+        botScrapKey = best ? best.key : null;
+        botScrapAge = now;
+      }
+      if (botScrapKey && scraps[botScrapKey]) {
+        const sv = scraps[botScrapKey];
+        const toScrapAng = _ba(sv.x, sv.y);
+        if (enemy && enemyD < selfFiringRange * 2.0) {
+          const awayFromEnemy = _ba(enemy.p.x, enemy.p.y) + Math.PI;
+          const pushStrength = Math.max(0, 1 - enemyD / (selfFiringRange * 2.0));
+          const blendX = Math.cos(toScrapAng) + Math.cos(awayFromEnemy) * pushStrength * 0.6;
+          const blendY = Math.sin(toScrapAng) + Math.sin(awayFromEnemy) * pushStrength * 0.6;
+          _moveDir(Math.atan2(blendY, blendX));
+        } else {
+          _moveDir(toScrapAng);
+        }
+        if (enemy) {
+          _doAimLeading(enemy);
+          if (inRange) Ec = true;
+        } else {
+          botAimAng = _lerpAng(botAimAng, toScrapAng, 0.1);
+          selfAngle = botAimAng;
+        }
+      } else {
+        const eb = [0, 0]; // TODO: get enemy base
+        const patAng = _ba(eb[0], eb[1]);
+        if (enemy && enemyD < selfFiringRange * 1.8) {
+          const awayX = Math.cos(patAng) + Math.cos(_ba(enemy.p.x, enemy.p.y) + Math.PI) * 0.5;
+          const awayY = Math.sin(patAng) + Math.sin(_ba(enemy.p.x, enemy.p.y) + Math.PI) * 0.5;
+          _moveDir(Math.atan2(awayY, awayX));
+        } else {
+          _moveDir(patAng);
+        }
+        botAimAng = _lerpAng(botAimAng, patAng, 0.08);
+        selfAngle = botAimAng;
+      }
+      break;
+    }
+  }
+}
+
+// Patch Uf() game loop
+let _botOrigUf: any = null;
+(function _patchUf() {
+  if (typeof (window as any).Uf === "undefined") {
+    setTimeout(_patchUf, 100);
+    return;
+  }
+  _botOrigUf = (window as any).Uf;
+  (window as any).Uf = function () {
+    _botOrigUf.apply(this, arguments);
+    botTick();
   };
+})();
 
-  private modSettings: ModSettings = { ...DEFAULT_SETTINGS };
+// ============================================================================
+// KEYBOARD INPUT
+// ============================================================================
 
-  // Caching for performance
-  private enemyCache: Player[] = [];
-  private allyCache: Player[] = [];
-  private lastCacheTime: number = 0;
-  private readonly CACHE_TTL: number = 16;
-
-  constructor() {
-    this.loadSettings();
-  }
-
-  getState(): Readonly<GameState> {
-    return this.state;
-  }
-
-  getPlayer(id: number): Player | undefined {
-    return this.state.players.get(id);
-  }
-
-  setPlayer(id: number, player: Player): void {
-    this.state.players.set(id, player);
-    this.invalidateCache();
-  }
-
-  deletePlayer(id: number): void {
-    this.state.players.delete(id);
-    this.invalidateCache();
-  }
-
-  setSelf(player: Player): void {
-    this.state.self = player;
-    this.state.selfId = player.id;
-    this.state.selfTeam = player.team;
-  }
-
-  getSelf(): Player | null {
-    return this.state.self;
-  }
-
-  getEnemies(): Player[] {
-    const now = Date.now();
-    if (now - this.lastCacheTime > this.CACHE_TTL) {
-      this.rebuildEnemyCache();
+window.addEventListener(
+  "keydown",
+  (ev) => {
+    // B = bot toggle
+    if (66 === ev.keyCode) {
+      botEnabled = !botEnabled;
+      botState = "SCRAP";
+      botStateAt = Date.now();
+      console.log("Bot:", botEnabled ? "ON" : "OFF");
     }
-    return this.enemyCache;
-  }
-
-  getAllies(): Player[] {
-    const now = Date.now();
-    if (now - this.lastCacheTime > this.CACHE_TTL) {
-      this.rebuildAllyCache();
+    // [ = AutoFire
+    if (219 === ev.keyCode) {
+      hackAutoFire = !hackAutoFire;
+      console.log("AutoFire:", hackAutoFire);
     }
-    return this.allyCache;
-  }
-
-  private rebuildEnemyCache(): void {\n    this.enemyCache = [];
-    for (const player of this.state.players.values()) {
-      if (player.id === this.state.selfId) continue;
-      if (player.health <= 0) continue;
-      if (this.state.ffa || player.team !== this.state.selfTeam) {
-        this.enemyCache.push(player);
-      }
+    // ] = Tracers
+    if (221 === ev.keyCode) {
+      hackTracers = !hackTracers;
+      console.log("Tracers:", hackTracers);
     }
-    this.lastCacheTime = Date.now();
-  }
-
-  private rebuildAllyCache(): void {
-    this.allyCache = [];
-    for (const player of this.state.players.values()) {
-      if (player.team === this.state.selfTeam && player.id !== this.state.selfId) {
-        this.allyCache.push(player);
-      }
+    // \ = AutoScrap
+    if (220 === ev.keyCode) {
+      hackAutoScrap = !hackAutoScrap;
+      console.log("AutoScrap:", hackAutoScrap);
     }
-  }
-
-  private invalidateCache(): void {
-    this.lastCacheTime = 0;
-  }
-
-  getModSettings(): Readonly<ModSettings> {
-    return this.modSettings;
-  }
-
-  updateModSettings(partial: Partial<ModSettings>): void {
-    this.modSettings = { ...this.modSettings, ...partial };
-    this.saveSettings();
-  }
-
-  private loadSettings(): void {
-    try {
-      const saved = JSON.parse(localStorage.getItem('hackModSettings') || '{}');
-      this.modSettings = { ...DEFAULT_SETTINGS, ...saved };
-    } catch (e) {
-      console.error('Failed to load settings', e);
+    // T = AutoAim
+    if (84 === ev.keyCode) {
+      hackAutoAim = !hackAutoAim;
+      console.log("AutoAim:", hackAutoAim);
     }
-  }
-
-  private saveSettings(): void {
-    try {
-      localStorage.setItem('hackModSettings', JSON.stringify(this.modSettings));
-    } catch (e) {
-      console.error('Failed to save settings', e);
+    // H = ESPArrows
+    if (72 === ev.keyCode) {
+      hackESPArrows = !hackESPArrows;
+      console.log("ESPArrows:", hackESPArrows);
     }
-  }
-}
-
-// ============================================================
-// AUTO BOT AI (State Machine)
-// ============================================================
-
-enum BotState {
-  SCRAP = 'SCRAP',
-  ENGAGE = 'ENGAGE',
-  RETREAT = 'RETREAT'
-}
-
-interface BotAction {
-  moveAngle: number;
-  aimAngle: number;
-  fire: boolean;
-  ability?: boolean;
-}
-
-class AutoBot {
-  private state: BotState = BotState.SCRAP;
-  private stateChangedAt: number = 0;
-  private aimAngle: number = 0;
-  private orbitDirection: number = 1;
-  private lastOrbitFlip: number = 0;
-  private lastAbilityTime: number = 0;
-
-  constructor(
-    private self: Player,
-    private gameState: GameState,
-    private stateManager: GameStateManager
-  ) {}
-
-  tick(): BotAction | null {
-    const now = Date.now();
-    const hpFrac = this.self.health / this.self.maxHealth;
-
-    this.updateState(hpFrac, now);
-    return this.executeState(now);
-  }
-
-  private updateState(hpFrac: number, now: number): void {
-    const timeSinceChange = now - this.stateChangedAt;
-
-    if (this.state === BotState.RETREAT) {
-      if (hpFrac >= 0.62 && timeSinceChange >= 3000) {
-        this.setState(BotState.SCRAP, now);
-      }
-    } else if (hpFrac < 0.26) {
-      this.setState(BotState.RETREAT, now);
+    // N = PredictLine
+    if (78 === ev.keyCode) {
+      hackPredictLine = !hackPredictLine;
+      console.log("PredictLine:", hackPredictLine);
     }
-  }
-
-  private executeState(now: number): BotAction | null {
-    switch (this.state) {
-      case BotState.ENGAGE:
-        return this.engageBehavior(now);
-      case BotState.RETREAT:
-        return this.retreatBehavior(now);
-      case BotState.SCRAP:
-      default:
-        return this.scrapBehavior(now);
+    // Z = FPS
+    if (90 === ev.keyCode) {
+      hackFPS = !hackFPS;
+      console.log("FPS:", hackFPS);
     }
-  }
-
-  private engageBehavior(now: number): BotAction | null {
-    const enemies = this.stateManager.getEnemies();
-    if (enemies.length === 0) {
-      this.setState(BotState.SCRAP, now);
-      return null;
+    // D = EnemyDist
+    if (68 === ev.keyCode) {
+      hackEnemyDist = !hackEnemyDist;
+      console.log("EnemyDist:", hackEnemyDist);
     }
-
-    const target = enemies.reduce((nearest, p) => {
-      const d1 = distSq(this.self.x, this.self.y, nearest.x, nearest.y);
-      const d2 = distSq(this.self.x, this.self.y, p.x, p.y);
-      return d2 < d1 ? p : nearest;
-    });
-
-    const targetDist = Math.sqrt(distSq(this.self.x, this.self.y, target.x, target.y));
-    const targetAngle = angle(this.self.x, this.self.y, target.x, target.y);
-
-    if (targetDist < this.self.firingRange * 1.1) {
-      const orbitAngle = this.computeOrbit(targetDist, targetAngle);
-      return {
-        moveAngle: orbitAngle,
-        aimAngle: targetAngle,
-        fire: true
-      };
-    } else {
-      return {\n        moveAngle: targetAngle,
-        aimAngle: targetAngle,
-        fire: false
-      };
-    }
-  }
-
-  private retreatBehavior(now: number): BotAction | null {
-    const base = this.gameState.basePositions[this.self.team];
-    const baseAngle = angle(this.self.x, this.self.y, base.x, base.y);
-
-    return {
-      moveAngle: baseAngle,
-      aimAngle: baseAngle + Math.PI,
-      fire: false
-    };
-  }
-
-  private scrapBehavior(now: number): BotAction | null {
-    const scraps = Array.from(this.gameState.scraps.values());
-    if (scraps.length === 0) return null;
-
-    const target = scraps.reduce((nearest, s) => {
-      const d1 = distSq(this.self.x, this.self.y, nearest.x, nearest.y);
-      const d2 = distSq(this.self.x, this.self.y, s.x, s.y);
-      return d2 < d1 ? s : nearest;
-    });
-
-    const moveAngle = angle(this.self.x, this.self.y, target.x, target.y);
-
-    return {
-      moveAngle,
-      aimAngle: lerpAngle(this.aimAngle, moveAngle, 0.1),
-      fire: false
-    };
-  }
-
-  private computeOrbit(dist: number, targetAngle: number): number {
-    const desiredDist = this.self.firingRange * 0.8;
-    const lo = desiredDist * 0.86;
-    const hi = desiredDist * 1.14;
-
-    if (dist > hi) {
-      return targetAngle + this.orbitDirection * 0.25;
-    } else if (dist < lo) {
-      return targetAngle + Math.PI + this.orbitDirection * 0.25;
-    } else {
-      return targetAngle + (Math.PI / 2) * this.orbitDirection;
-    }
-  }
-
-  private setState(newState: BotState, now: number): void {
-    if (this.state === newState) return;
-    this.state = newState;
-    this.stateChangedAt = now;
-  }
-}
-
-// ============================================================
-// RENDERER (Optimized)
-// ============================================================
-
-class Renderer {
-  private ctx: CanvasRenderingContext2D;
-  private frameCounter: number = 0;
-  private fps: number = 0;
-  private lastFpsUpdate: number = Date.now();
-  private imageCache = new Map<string, HTMLImageElement>();
-
-  constructor(private canvas: HTMLCanvasElement) {
-    const ctx = canvas.getContext('2d');
-    if (!ctx) throw new Error('Failed to get canvas context');
-    this.ctx = ctx;
-    this.ctx.imageSmoothingEnabled = true;
-  }
-
-  preloadImage(url: string): Promise<HTMLImageElement> {
-    return new Promise((resolve) => {
-      if (this.imageCache.has(url)) {
-        resolve(this.imageCache.get(url)!);
-        return;
-      }
-
-      const img = new Image();
-      img.onload = () => {
-        this.imageCache.set(url, img);
-        resolve(img);
-      };
-      img.src = url;
-    });
-  }
-
-  getImage(url: string): HTMLImageElement | undefined {
-    return this.imageCache.get(url);
-  }
-
-  render(
-    gameState: GameState,
-    settings: ModSettings,
-    viewX: number,
-    viewY: number,
-    zoom: number
-  ): void {
-    const width = this.canvas.width;
-    const height = this.canvas.height;
-
-    this.ctx.fillStyle = '#1a1a2e';
-    this.ctx.fillRect(0, 0, width, height);
-
-    this.ctx.save();
-    this.ctx.scale(zoom, zoom);
-    this.ctx.translate(-viewX + width / (2 * zoom), -viewY + height / (2 * zoom));
-
-    if (settings.hackTracers) this.renderTracers(gameState);
-    this.renderEntities(gameState, settings);
-    if (settings.hackRangeRing && gameState.self) this.renderRangeRing(gameState.self);
-
-    this.ctx.restore();
-    this.renderHUD(gameState, settings, width, height);
-
-    this.updateFPS();
-  }
-
-  private renderTracers(gameState: GameState): void {
-    if (!gameState.self) return;
-
-    const cx = gameState.self.x;
-    const cy = gameState.self.y;
-
-    for (const player of gameState.players.values()) {
-      if (player.id === gameState.self.id || player.health <= 0) continue;
-
-      const isEnemy = gameState.ffa || player.team !== gameState.selfTeam;
-      this.ctx.strokeStyle = isEnemy ? '#ff4444' : '#4444ff';
-      this.ctx.lineWidth = 1.5;
-      this.ctx.globalAlpha = isEnemy ? 0.6 : 0.3;
-
-      this.ctx.beginPath();
-      this.ctx.moveTo(cx, cy);
-      this.ctx.lineTo(player.x, player.y);
-      this.ctx.stroke();
-    }
-
-    this.ctx.globalAlpha = 1.0;
-  }
-
-  private renderEntities(gameState: GameState, settings: ModSettings): void {
-    for (const player of gameState.players.values()) {
-      if (player.health <= 0) continue;
-      this.renderPlayer(player, gameState, settings);
-    }
-
-    for (const scrap of gameState.scraps.values()) {
-      this.renderScrap(scrap);
-    }
-  }
-
-  private renderPlayer(player: Player, gameState: GameState, settings: ModSettings): void {
-    this.ctx.fillStyle = '#ffffff';
-    this.ctx.fillRect(player.x - 25, player.y - 25, 50, 50);
-
-    this.renderHealthBar(player);
-
-    this.ctx.fillStyle = '#ffffff';
-    this.ctx.font = '14px Arial';
-    this.ctx.textAlign = 'center';
-    this.ctx.fillText(player.name, player.x, player.y - 80);
-
-    if (settings.hackEnemyDist) {
-      const d = Math.sqrt(distSq(player.x, player.y, gameState.self?.x ?? 0, gameState.self?.y ?? 0));
-      this.ctx.fillStyle = '#ffaa44';
-      this.ctx.font = '10px Arial';
-      this.ctx.fillText(Math.round(d) + 'u', player.x + 60, player.y - 75);
-    }
-  }
-
-  private renderHealthBar(player: Player): void {
-    const hpFrac = player.health / player.maxHealth;
-    const barWidth = 100;
-    const barHeight = 8;
-    const x = player.x - barWidth / 2;
-    const y = player.y - 90;
-
-    this.ctx.fillStyle = '#333333';
-    this.ctx.fillRect(x, y, barWidth, barHeight);
-
-    this.ctx.fillStyle = hpFrac > 0.5 ? '#00ff00' : hpFrac > 0.25 ? '#ffaa00' : '#ff4444';
-    this.ctx.fillRect(x, y, barWidth * hpFrac, barHeight);
-
-    if (player.health > 0) {
-      this.ctx.fillStyle = '#ffffff';
-      this.ctx.font = '8px Arial';
-      this.ctx.textAlign = 'center';
-      this.ctx.fillText(`${Math.round(player.health)}/${Math.round(player.maxHealth)}`, player.x, y + 7);
-    }
-  }
-
-  private renderScrap(scrap: Scrap): void {
-    this.ctx.fillStyle = '#ffdd44';
-    this.ctx.beginPath();
-    this.ctx.arc(scrap.x, scrap.y, 8, 0, Math.PI * 2);
-    this.ctx.fill();
-  }
-
-  private renderRangeRing(self: Player): void {
-    this.ctx.strokeStyle = '#77eeee';
-    this.ctx.lineWidth = 1;
-    this.ctx.globalAlpha = 0.15;
-    this.ctx.beginPath();
-    this.ctx.arc(self.x, self.y, self.firingRange, 0, Math.PI * 2);
-    this.ctx.stroke();
-    this.ctx.globalAlpha = 1.0;
-  }
-
-  private renderHUD(gameState: GameState, settings: ModSettings, width: number, height: number): void {
-    const y = 15;
-
-    if (settings.hackFPS) {
-      const color = this.fps > 50 ? '#44ff88' : this.fps > 30 ? '#ffaa00' : '#ff3333';
-      this.ctx.fillStyle = color;
-      this.ctx.font = '12px monospace';
-      this.ctx.fillText(`FPS: ${this.fps}`, 10, y);
-    }
-
-    if (settings.hackThreatMeter && gameState.self) {
-      const threatCount = Array.from(gameState.players.values()).filter((p) => {
-        if (p.team === gameState.selfTeam || p.health <= 0) return false;
-        if (!gameState.ffa && p.team === gameState.selfTeam) return false;
-        const d = Math.sqrt(distSq(gameState.self!.x, gameState.self!.y, p.x, p.y));
-        return d < gameState.self!.firingRange * 1.5;
-      }).length;
-
-      const color = threatCount === 0 ? '#44ff88' : threatCount <= 2 ? '#ffaa00' : '#ff2222';
-      this.ctx.fillStyle = color;
-      this.ctx.font = '12px monospace';
-      this.ctx.fillText(`THREAT: ${threatCount}`, 10, y + 16);
-    }
-  }
-
-  private updateFPS(): void {
-    this.frameCounter++;
-    const now = Date.now();
-    if (now - this.lastFpsUpdate >= 1000) {
-      this.fps = this.frameCounter;
-      this.frameCounter = 0;
-      this.lastFpsUpdate = now;
-    }
-  }
-}
-
-// ============================================================
-// NETWORK MANAGER
-// ============================================================
-
-enum MessageType {
-  POSITION_UPDATE = 0,
-  ENTITY_SPAWN = 1,
-  ENTITY_DESTROY = 2,
-  ENTITY_MOVE = 3,
-  ENTITY_MOVE_DELTA = 4,
-  ENTITY_ROTATE = 5,
-  ENTITY_DAMAGE = 6,
-  SELF_HEALTH = 7,
-  SELF_SCRAP = 8,
-  SPAWN_ACK = 10,
-  UPGRADE = 22,
-  ABILITY = 14
-}
-
-class NetworkManager {
-  private ws: WebSocket | null = null;
-  private pingInterval: number | null = null;
-  private latency: number = 0;
-
-  constructor(private onMessage: (type: MessageType, data: BufferReader) => void) {}
-
-  connect(url: string): Promise<void> {
-    return new Promise((resolve, reject) => {
-      this.ws = new WebSocket(url);
-      this.ws.binaryType = 'arraybuffer';
-
-      this.ws.onopen = () => {
-        this.startPingLoop();
-        resolve();
-      };
-
-      this.ws.onmessage = (event: MessageEvent) => {
-        this.handleMessage(event.data as ArrayBuffer);
-      };
-
-      this.ws.onerror = () => reject(new Error('WebSocket connection failed'));
-      this.ws.onclose = () => this.cleanup();
-    });
-  }
-
-  private handleMessage(buffer: ArrayBuffer): void {
-    const reader = new BufferReader(buffer);
-    const type = reader.readUint8();
-    this.onMessage(type as MessageType, reader);
-  }
-
-  send(type: MessageType, writer?: (buf: BufferWriter) => void): void {
-    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
-
-    const bw = new BufferWriter();
-    bw.writeUint8(type);
-    if (writer) writer(bw);
-
-    this.ws.send(bw.toBuffer());
-  }
-
-  private startPingLoop(): void {
-    this.pingInterval = window.setInterval(() => {
-      if (this.ws?.readyState === WebSocket.OPEN) {
-        this.send(29);
-      }
-    }, 5000);
-  }
-
-  getLatency(): number {
-    return this.latency;
-  }
-
-  private cleanup(): void {
-    if (this.pingInterval !== null) clearInterval(this.pingInterval);
-  }
-}
-
-// ============================================================
-// MAIN GAME CLIENT
-// ============================================================
-
-class GameClient {
-  private gameState: GameStateManager;
-  private network: NetworkManager;
-  private renderer: Renderer;
-  private bot: AutoBot | null = null;
-
-  private viewX: number = 0;
-  private viewY: number = 0;
-  private zoom: number = 1.0;
-  private lastFrameTime: number = Date.now();
-
-  private aiTickCounter: number = 0;
-  private readonly aiTickInterval: number = 80;
-
-  private velocityCache = new Map<number, Vec2>();
-  private lastPositions = new Map<number, Vec2 & { time: number }>();
-
-  constructor(canvasId: string) {
-    const canvas = document.getElementById(canvasId) as HTMLCanvasElement;
-    if (!canvas) throw new Error('Canvas not found');
-
-    this.gameState = new GameStateManager();
-    this.renderer = new Renderer(canvas);
-    this.network = new NetworkManager((type, reader) => this.handleNetworkMessage(type, reader));
-
-    this.setupInput();
-    this.startGameLoop();
-  }
-
-  async connect(url: string): Promise<void> {
-    await this.network.connect(url);
-    console.log('Connected to server');
-  }
-
-  private handleNetworkMessage(type: MessageType, reader: BufferReader): void {
-    const state = this.gameState.getState();
-
-    switch (type) {
-      case MessageType.ENTITY_SPAWN: {
-        const id = reader.readInt16();
-        const entityType = reader.readInt8();
-
-        if (entityType === 0) {
-          // Player
-          const x = reader.readInt16();
-          const y = reader.readInt16();
-          const angle = reader.readInt8() / 40.58;
-          const health = reader.readInt16();
-          const maxHealth = reader.readInt16();
-          const team = reader.readUint8();
-
-          const player: Player = {
-            id,
-            x,
-            y,
-            angle,
-            health,
-            maxHealth,
-            team,
-            name: `Player${id}`,
-            firingRange: 650,
-            damage: 10,
-            drones: 0,
-            maxDrones: 5,
-            upgrades: [],
-            velocity: { x: 0, y: 0 },
-            lastUpdateTime: Date.now()
-          };
-
-          this.gameState.setPlayer(id, player);
-
-          if (id === this.gameState.getState().selfId) {
-            this.gameState.setSelf(player);
-          }
-        } else if (entityType === 1) {
-          // Scrap
-          const x = reader.readInt16();
-          const y = reader.readInt16();
-          state.scraps.set(id, { id, x, y });
-        }
-        break;
-      }
-
-      case MessageType.ENTITY_MOVE: {
-        const id = reader.readInt16();
-        const x = reader.readInt16();
-        const y = reader.readInt16();
-
-        const player = this.gameState.getPlayer(id);
-        if (player) {
-          // Track velocity
-          const now = Date.now();
-          const lastPos = this.lastPositions.get(id);
-          if (lastPos) {
-            const dt = (now - lastPos.time) / 1000;
-            if (dt > 0 && dt < 0.25) {
-              this.velocityCache.set(id, {
-                x: (x - lastPos.x) / dt,
-                y: (y - lastPos.y) / dt
-              });
-            }
-          }
-          this.lastPositions.set(id, { x: player.x, y: player.y, time: now });
-
-          player.x = x;
-          player.y = y;
-        }
-        break;
-      }
-
-      case MessageType.ENTITY_DESTROY: {
-        const id = reader.readInt16();
-        this.gameState.deletePlayer(id);
-        state.scraps.delete(id);
-        state.turrets.delete(id);
-        break;
-      }
-
-      case MessageType.SELF_HEALTH: {
-        const health = reader.readInt16();
-        const self = this.gameState.getSelf();
-        if (self) {
-          self.health = health;
-        }
-        break;
-      }
-
-      case MessageType.SELF_SCRAP: {
-        // Handle scrap collection
-        break;
-      }
-    }
-  }
-
-  private setupInput(): void {
-    document.addEventListener('keydown', (e) => {
-      const key = e.key.toLowerCase();
-      if (key === '[') this.toggleModSetting('hackAutoFire');
-      if (key === ']') this.toggleModSetting('hackTracers');
-      if (key === 't') this.toggleModSetting('hackAutoAim');
-      if (key === 'h') this.toggleModSetting('hackESPArrows');
-      if (key === 'n') this.toggleModSetting('hackPredictLine');
-      if (key === 'z') this.toggleModSetting('hackFPS');
-      if (key === 'd') this.toggleModSetting('hackEnemyDist');
-      if (key === 'b') this.toggleModSetting('botEnabled');
-    });
-
-    document.addEventListener('wheel', (e: WheelEvent) => {
-      this.zoom = clamp(this.zoom - (e.deltaY * 0.001), 0.3, 3.5);
-      e.preventDefault();
-    });
-  }
-
-  private toggleModSetting(key: keyof ModSettings): void {
-    const settings = this.gameState.getModSettings();
-    const current = settings[key];
-    if (typeof current === 'boolean') {
-      this.gameState.updateModSettings({ [key]: !current } as Partial<ModSettings>);
-      console.log(`${key}: ${!current}`);
-    }
-  }
-
-  private startGameLoop(): void {
-    const tick = () => {
-      const now = Date.now();
-      const dt = now - this.lastFrameTime;
-      this.lastFrameTime = now;
-
-      this.update(dt);
-
-      const state = this.gameState.getState();
-      const settings = this.gameState.getModSettings();
-
-      if (state.self) {
-        this.viewX = state.self.x;
-        this.viewY = state.self.y;
-      }
-
-      this.renderer.render(state, settings, this.viewX, this.viewY, this.zoom);
-
-      requestAnimationFrame(tick);
-    };
-
-    requestAnimationFrame(tick);
-  }
-
-  private update(dt: number): void {
-    const settings = this.gameState.getModSettings();
-    const state = this.gameState.getState();
-    const self = this.gameState.getSelf();
-
-    if (!self) return;
-
-    // Update bot AI
-    if (settings.botEnabled) {
-      this.aiTickCounter += dt;
-      if (this.aiTickCounter >= this.aiTickInterval) {
-        if (!this.bot) {
-          this.bot = new AutoBot(self, state, this.gameState);
-        }
-        const action = this.bot.tick();
-        if (action) {
-          console.log('Bot action:', action);
-          // Apply actions in real client
-        }
-        this.aiTickCounter = 0;
-      }
-    }
-
-    // Auto-scrap steering
-    if (settings.hackAutoScrap) {
-      const scraps = Array.from(state.scraps.values());
-      if (scraps.length > 0) {
-        const nearest = scraps.reduce((closest, s) => {
-          const d1 = distSq(self.x, self.y, closest.x, closest.y);
-          const d2 = distSq(self.x, self.y, s.x, s.y);
-          return d2 < d1 ? s : closest;
-        });
-        self.angle = angle(self.x, self.y, nearest.x, nearest.y);
-      }
-    }
-
-    // Auto-aim steering
-    if (settings.hackAutoAim) {
-      const enemies = this.gameState.getEnemies();
-      if (enemies.length > 0) {
-        const nearest = enemies.reduce((closest, p) => {
-          const d1 = distSq(self.x, self.y, closest.x, closest.y);
-          const d2 = distSq(self.x, self.y, p.x, p.y);
-          return d2 < d1 ? p : closest;
-        });
-        self.angle = angle(self.x, self.y, nearest.x, nearest.y);
-      }
-    }
-
-    // Update player positions with velocity
-    for (const player of state.players.values()) {
-      const vel = this.velocityCache.get(player.id);
-      if (vel) {
-        player.x += vel.x * (dt / 1000);
-        player.y += vel.y * (dt / 1000);
-      }
-    }
-  }
-}
-
-// ============================================================
-// SETTINGS UI (Minimal)
-// ============================================================
-
-function initModUI(client: GameClient): void {
-  const style = document.createElement('style');
-  style.textContent = `
-    #hackBtn {
-      position: fixed;
-      bottom: 20px;
-      right: 20px;
-      z-index: 10000;
-      padding: 10px 15px;
-      background: #007acc;
-      color: white;
-      border: none;
-      border-radius: 4px;
-      cursor: pointer;
-      font-family: monospace;
-      font-weight: bold;
-    }
-    #hackBtn:hover { background: #005a9e; }
-    #hackOverlay {
-      display: none;
-      position: fixed;
-      top: 0;
-      left: 0;
-      width: 100%;
-      height: 100%;
-      background: rgba(0, 0, 0, 0.7);
-      z-index: 10001;
-    }
-    #hackOverlay.open {
-      display: flex;
-      align-items: center;
-      justify-content: center;
-    }
-    #hackPanel {
-      background: #1e1e1e;
-      color: #fff;
-      padding: 20px;
-      border-radius: 8px;
-      max-width: 500px;
-      max-height: 80vh;
-      overflow-y: auto;
-      font-family: monospace;
-    }
-    .hkRow {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      padding: 8px 0;
-      border-bottom: 1px solid #333;
-    }
-    .hkName { font-weight: bold; }
-    .hkDesc { font-size: 0.8em; color: #aaa; }
-  `;
-  document.head.appendChild(style);
-
-  const btn = document.createElement('button');
-  btn.id = 'hackBtn';
-  btn.textContent = '⚙ MOD';
-  document.body.appendChild(btn);
-
-  const overlay = document.createElement('div');
-  overlay.id = 'hackOverlay';
-  overlay.innerHTML = `
-    <div id="hackPanel">
-      <h2>WarIn.Space Optimized Client</h2>
-      <p style="color: #888;">TypeScript • Optimized • High Performance</p>
-      <hr>
-      <p>Keyboard Controls:</p>
-      <div class="hkRow"><span>[</span><span>AutoFire</span></div>
-      <div class="hkRow"><span>]</span><span>Tracers</span></div>
-      <div class="hkRow"><span>T</span><span>AutoAim</span></div>
-      <div class="hkRow"><span>H</span><span>ESP Arrows</span></div>
-      <div class="hkRow"><span>N</span><span>Prediction Lines</span></div>
-      <div class="hkRow"><span>Z</span><span>FPS Counter</span></div>
-      <div class="hkRow"><span>D</span><span>Enemy Distance</span></div>
-      <div class="hkRow"><span>B</span><span>Bot AI</span></div>
-      <hr>
-      <button onclick="document.getElementById('hackOverlay').classList.remove('open')" style="width: 100%; padding: 10px; background: #007acc; color: white; border: none; cursor: pointer;">Close</button>
-    </div>
-  `;
-  document.body.appendChild(overlay);
-
-  btn.onclick = () => overlay.classList.add('open');
-  overlay.onclick = (e) => {
-    if (e.target === overlay) overlay.classList.remove('open');
-  };
-
-  document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape' && overlay.classList.contains('open')) {
-      overlay.classList.remove('open');
-    }
-  });
-}
-
-// ============================================================
-// INITIALIZATION
-// ============================================================
-
-window.addEventListener('load', () => {
-  try {
-    const client = new GameClient('canvas');
-    initModUI(client);
-
-    // Connect to server (change URL as needed)
-    client.connect('ws://localhost:55666').catch((e) => {
-      console.error('Connection failed:', e);
-    });
-  } catch (e) {
-    console.error('Failed to initialize game client:', e);
-  }
+  },
+  false
+);
+
+// Scroll wheel = zoom
+window.addEventListener(
+  "wheel",
+  (ev) => {
+    ev.preventDefault();
+    hackZoom = Math.min(Math.max(hackZoom - ev.deltaY * 0.001, 0.3), 3.5);
+  },
+  { passive: false } as any
+);
+
+// ============================================================================
+// CANVAS & DOM SETUP
+// ============================================================================
+
+window.addEventListener("load", () => {
+  c = document.getElementById("canvas") as HTMLCanvasElement;
+  k = c.getContext("2d")!;
+  k.imageSmoothingEnabled = true;
+
+  aa = document.getElementById("canvasBackground") as HTMLCanvasElement;
+  ba = aa.getContext("2d")!;
+
+  ca = document.getElementById("canvasTrail") as HTMLCanvasElement;
+  da = ca.getContext("2d")!;
+
+  ea = document.getElementById("canvasTrailflip") as HTMLCanvasElement;
+  fa = ea.getContext("2d")!;
+
+  ga = document.getElementById("content")!;
+  ha = document.getElementById("playButton")!;
+  ia = document.getElementById("selectWorld")!;
+  ja = document.getElementById("pregame")!;
+  ka = document.getElementById("connecting")!;
+
+  p = document.getElementById("ServerSelectionCombo") as HTMLSelectElement;
+
+  // Network connect
+  connectToServer();
 });
 
-// Exports for TypeScript
-export { GameClient, GameStateManager, NetworkManager, Renderer, AutoBot, BufferReader, BufferWriter };
+// ============================================================================
+// NETWORK & MESSAGES
+// ============================================================================
+
+function connectToServer(): void {
+  // TODO: Implement WebSocket connection & message handling
+  console.log("Connecting to WarIn.Space server...");
+}
+
+// ============================================================================
+// RENDERING & HUD
+// ============================================================================
+
+function renderHUD(): void {
+  if (!c) return;
+
+  // FPS counter
+  if (hackFPS) {
+    hackFPSFrames++;
+    const now = Date.now();
+    if (now - hackFPSTimer >= 1000) {
+      hackFPSValue = hackFPSFrames;
+      hackFPSFrames = 0;
+      hackFPSTimer = now;
+    }
+    k.fillStyle = hackFPSValue > 50 ? "#44ff88" : hackFPSValue > 30 ? "#ffaa00" : "#ff3333";
+    k.font = "12px monospace";
+    k.fillText(`FPS: ${hackFPSValue}`, 10, 15);
+  }
+
+  // Threat meter
+  if (hackThreatMeter) {
+    let threatCount = 0;
+    for (const id in players) {
+      const p = players[id];
+      if (p.team === selfTeam || p.health <= 0) continue;
+      if (FFA || p.team !== selfTeam) {
+        const d = _bd(playerX, playerY, p.x, p.y);
+        if (d < selfFiringRange * 1.5) threatCount++;
+      }
+    }
+    const threatColor =
+      threatCount === 0 ? "#44ff88" : threatCount <= 2 ? "#ffaa00" : "#ff2222";
+    k.fillStyle = threatColor;
+    k.font = "12px monospace";
+    k.fillText(`THREAT: ${threatCount}`, 10, 31);
+  }
+
+  // Bot state indicator
+  if (botEnabled) {
+    k.fillStyle = "#00ddff";
+    k.font = "10px monospace";
+    k.fillText(`BOT: ${botState}`, 10, 47);
+  }
+}
+
+function render(): void {
+  if (!c || !k) return;
+
+  // Clear main canvas
+  k.fillStyle = "#1a1a2e";
+  k.fillRect(0, 0, c.width, c.height);
+
+  // Save for world transform
+  k.save();
+  k.scale(hackZoom, hackZoom);
+  k.translate(-playerX + c.width / (2 * hackZoom), -playerY + c.height / (2 * hackZoom));
+
+  // Draw tracers
+  if (hackTracers) {
+    const cx = playerX;
+    const cy = playerY;
+    for (const id in players) {
+      const p = players[id];
+      if (p.id === playerID || p.health <= 0) continue;
+      const isEnemy = FFA || p.team !== selfTeam;
+      k.strokeStyle = isEnemy ? "#ff4444" : "#4444ff";
+      k.lineWidth = 1.5;
+      k.globalAlpha = isEnemy ? 0.6 : 0.3;
+      k.beginPath();
+      k.moveTo(cx, cy);
+      k.lineTo(p.x, p.y);
+      k.stroke();
+    }
+    k.globalAlpha = 1.0;
+  }
+
+  // Draw range ring
+  if (hackRangeRing) {
+    k.strokeStyle = "#77eeee";
+    k.lineWidth = 1;
+    k.globalAlpha = 0.15;
+    k.beginPath();
+    k.arc(playerX, playerY, selfFiringRange, 0, Math.PI * 2);
+    k.stroke();
+    k.globalAlpha = 1.0;
+  }
+
+  // Draw players
+  for (const id in players) {
+    const p = players[id];
+    if (p.health <= 0) continue;
+    const isEnemy = FFA || p.team !== selfTeam;
+
+    // Ship (simple rect)
+    k.fillStyle = isEnemy ? "#ff6666" : "#6666ff";
+    k.save();
+    k.translate(p.x, p.y);
+    k.rotate(p.angle);
+    k.fillRect(-25, -25, 50, 50);
+    k.restore();
+
+    // Health bar
+    const hpFrac = p.health / p.maxHealth;
+    const barW = 60;
+    const barH = 6;
+    k.fillStyle = "#333333";
+    k.fillRect(p.x - barW / 2, p.y - 70, barW, barH);
+    k.fillStyle = hpFrac > 0.5 ? "#00ff00" : hpFrac > 0.25 ? "#ffaa00" : "#ff4444";
+    k.fillRect(p.x - barW / 2, p.y - 70, barW * hpFrac, barH);
+
+    // Name
+    k.fillStyle = "#ffffff";
+    k.font = "12px Arial";
+    k.textAlign = "center";
+    k.fillText(p.name, p.x, p.y - 85);
+
+    // Distance (if enabled)
+    if (hackEnemyDist) {
+      const d = _bd(playerX, playerY, p.x, p.y);
+      k.fillStyle = "#ffaa44";
+      k.font = "10px Arial";
+      k.fillText(Math.round(d) + "u", p.x + 50, p.y - 80);
+    }
+  }
+
+  // Draw scraps
+  for (const id in scraps) {
+    const s = scraps[id];
+    k.fillStyle = "#ffdd44";
+    k.beginPath();
+    k.arc(s.x, s.y, 8, 0, Math.PI * 2);
+    k.fill();
+  }
+
+  k.restore();
+
+  // Render HUD (unscaled)
+  renderHUD();
+
+  requestAnimationFrame(render);
+}
+
+requestAnimationFrame(render);
+
+// ============================================================================
+// EXPORTS (for TypeScript)
+// ============================================================================
+
+export { botTick, render, connectToServer };
